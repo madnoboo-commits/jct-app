@@ -1,0 +1,54 @@
+[
+ {
+  "diverge_node": 4,
+  "lat": 35.447,
+  "lng": 139.574,
+  "junction": "サンプルIC",
+  "mainline": "サンプル自専道",
+  "destination": "東京;第三京浜",
+  "views": [
+   {
+    "distance_m": 300,
+    "lat": 35.445173,
+    "lng": 139.571564,
+    "heading": 47,
+    "pitch": 8,
+    "url": "https://www.google.com/maps/@?api=1&map_action=pano&heading=47&pitch=8&fov=75&viewpoint=35.445173%2C139.571564"
+   },
+   {
+    "distance_m": 700,
+    "lat": 35.443178,
+    "lng": 139.567944,
+    "heading": 52,
+    "pitch": 8,
+    "url": "https://www.google.com/maps/@?api=1&map_action=pano&heading=52&pitch=8&fov=75&viewpoint=35.443178%2C139.567944"
+   }
+  ]
+ },
+ {
+  "diverge_node": 5,
+  "lat": 35.45,
+  "lng": 139.578,
+  "junction": "サンプルJCT",
+  "mainline": "サンプル自専道",
+  "destination": "横須賀",
+  "views": [
+   {
+    "distance_m": 300,
+    "lat": 35.448173,
+    "lng": 139.575563,
+    "heading": 47,
+    "pitch": 8,
+    "url": "https://www.google.com/maps/@?api=1&map_action=pano&heading=47&pitch=8&fov=75&viewpoint=35.448173%2C139.575563"
+   },
+   {
+    "distance_m": 700,
+    "lat": 35.445736,
+    "lng": 139.572315,
+    "heading": 47,
+    "pitch": 8,
+    "url": "https://www.google.com/maps/@?api=1&map_action=pano&heading=47&pitch=8&fov=75&viewpoint=35.445736%2C139.572315"
+   }
+  ]
+ }
+]
