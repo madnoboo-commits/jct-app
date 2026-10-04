@@ -13,9 +13,16 @@ JCT・IC分岐点ごとに、案内板が見えやすいストリートビュー
   python jct_streetview.py --bbox ... --key YOUR_GOOGLE_API_KEY     # パノラマ実在確認つき
   python jct_streetview.py --test                                  # 計算ロジックのテスト
 """
-import argparse, json, math, sys, urllib.parse, urllib.request
+import argparse, json, math, sys, time, urllib.parse, urllib.request
 
-OVERPASS = "https://overpass-api.de/api/interpreter"
+# 公開Overpassは混雑で 504/429 を返すことがあるため、複数のミラーを順に試す
+OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.osm.jp/api/interpreter",
+]
+OVERPASS = OVERPASS_MIRRORS[0]
 DISTANCES = [300, 700]   # 分岐点の手前何mから見るか(直前の標識、予告標識を想定)
 PITCH = 8                # 頭上の標識を見るため少し上向き
 FOV = 75
@@ -33,9 +40,26 @@ def overpass_query(bbox):
     out body; >; out body qt;
     """
     data = urllib.parse.urlencode({"data": q}).encode()
-    req = urllib.request.Request(OVERPASS, data, headers={"User-Agent": "jct-branch-app/0.1 (GitHub Actions)"})
-    with urllib.request.urlopen(req, timeout=320) as r:
-        return json.load(r)
+    last = None
+    for attempt in range(2):                      # ミラー一巡を2回まで
+        for url in OVERPASS_MIRRORS:
+            req = urllib.request.Request(
+                url, data, headers={"User-Agent": "jct-branch-app/0.1 (GitHub Actions)"})
+            try:
+                with urllib.request.urlopen(req, timeout=320) as r:
+                    print(f"Overpass 取得成功: {url}", file=sys.stderr)
+                    return json.load(r)
+            except Exception as e:
+                last = e
+                print(f"Overpass 失敗 ({url}): {e}", file=sys.stderr)
+        if attempt == 0:
+            wait = 30
+            print(f"{wait}秒待って再試行します…", file=sys.stderr)
+            time.sleep(wait)
+    raise SystemExit(
+        f"Overpass からデータを取得できませんでした（最後のエラー: {last}）。\n"
+        "サーバーの混雑が原因のことが多いため、数分おいてもう一度実行してください。\n"
+        "範囲(--bbox)を狭めると成功しやすくなります。")
 
 
 def haversine(a, b):
