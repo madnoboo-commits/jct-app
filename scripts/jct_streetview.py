@@ -205,6 +205,18 @@ def probe_nodes(ids):
         print()
 
 
+def probe_ways(ids):
+    """指定wayの全タグを表示する(本線の種別を見分ける手がかりを探す)"""
+    q = "[out:json][timeout:180];way(id:" + ",".join(str(i) for i in ids) + ");out tags;"
+    osm = overpass_raw(q)
+    for w in [e for e in osm["elements"] if e["type"] == "way"]:
+        t = w.get("tags", {})
+        print(f"way {w['id']}  ({t.get('name','名称なし')})")
+        for k in sorted(t):
+            print(f"    {k} = {t[k]}")
+        print()
+
+
 def diagnose(osm, keyword=""):
     """各ランプが分岐として採用された/されなかった理由を一覧で出す(原因調査用)"""
     nodes, main, links, pred, succ, main_name, skipped = build_graph(osm)
@@ -546,10 +558,14 @@ if __name__ == "__main__":
     ap.add_argument("--diagnose", action="store_true", help="分岐が検出されない原因を調べる")
     ap.add_argument("--picker", action="store_true", help="看板の位置を選ぶ確認用ページも出力する")
     ap.add_argument("--probe", help="指定ノードID(カンマ区切り)が属する道路を調べる")
+    ap.add_argument("--probe-ways", dest="probe_ways", help="指定wayID(カンマ区切り)の全タグを表示する")
     ap.add_argument("--keyword", default="", help="--diagnose で注目する分岐名")
     a = ap.parse_args()
     if a.probe:
         probe_nodes([int(x) for x in a.probe.split(",")])
+        sys.exit()
+    if a.probe_ways:
+        probe_ways([int(x) for x in a.probe_ways.split(",")])
         sys.exit()
     if a.test or not (a.bbox or a.from_file):
         self_test()
