@@ -21,7 +21,6 @@ OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
-    "https://overpass.osm.jp/api/interpreter",
 ]
 OVERPASS = OVERPASS_MIRRORS[0]
 DISTANCES = [100]        # 分岐点の手前何mから見るか
@@ -211,6 +210,16 @@ def find_diverges(osm, with_candidates=False, jct_only=False):
     for w in main:
         for nid in w["nodes"]:
             main_by_node.setdefault(nid, []).append(w)
+
+    if jct_only:
+        seen_names = {}
+        for w in main:
+            seen_names.setdefault(w.get("tags", {}).get("name", "(名称なし)"),
+                                  []).append(is_expressway(w))
+        print("--- 本線の分類 ---", file=sys.stderr)
+        for nm, flags in sorted(seen_names.items()):
+            kind = "高速" if any(flags) else "一般道"
+            print(f"  {kind}  {nm}", file=sys.stderr)
 
     results = []
     for lw in links:
