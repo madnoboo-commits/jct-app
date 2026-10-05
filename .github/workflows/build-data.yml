@@ -28,6 +28,11 @@ jobs:
       - name: 計算ロジックのテスト
         run: python scripts/jct_streetview.py --test
 
+      - name: 【一時】分岐の検出もれを調べる
+        env:
+          BBOX: ${{ inputs.bbox }}
+        run: python scripts/jct_streetview.py --diagnose --bbox "$BBOX" --keyword ""
+
       - name: OpenStreetMap から分岐を取得
         env:
           REGION: ${{ inputs.region }}
