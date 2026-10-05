@@ -194,6 +194,39 @@ def candidates_for(n0, p0, pred, nodes, span=PICK_SPAN, step=PICK_STEP, back=PIC
     return out
 
 
+DEDUPE_DIST = 150        # 同一分岐とみなす距離(m)
+DEDUPE_ANGLE = 45        # 同一分岐とみなす進行方向の差(度)
+
+
+def angle_diff(a, b):
+    d = abs(a - b) % 360
+    return min(d, 360 - d)
+
+
+def dedupe(results):
+    """同じ分岐が複数のランプwayで重複して出るのをまとめる。
+
+    上下線は進行方向が大きく違うため、向きが近いものだけを同一とみなす。
+    """
+    out = []
+    for r in results:
+        h = r["views"][0]["heading"]
+        same = None
+        for o in out:
+            if (o["junction"], o["mainline"], o["destination"]) != \
+               (r["junction"], r["mainline"], r["destination"]):
+                continue
+            if haversine((o["lat"], o["lng"]), (r["lat"], r["lng"])) > DEDUPE_DIST:
+                continue
+            if angle_diff(o["views"][0]["heading"], h) > DEDUPE_ANGLE:
+                continue
+            same = o
+            break
+        if same is None:
+            out.append(r)
+    return out
+
+
 def find_diverges(osm, with_candidates=False, jct_only=False):
     nodes, main, links, pred, succ, main_name, _ = build_graph(osm)
 
@@ -240,8 +273,12 @@ def find_diverges(osm, with_candidates=False, jct_only=False):
         if not views:
             continue
         if jct_only:
+            src_ways = main_by_node.get(n0, [])
+            # 分岐元そのものが高速でなければJCTではない(一般道から高速への入口を除く)
+            if not any(is_expressway(w) for w in src_ways):
+                continue
             # 分岐元の路線名(同じ本線の別wayを「別の高速」と誤判定しないため)
-            src = {w.get("tags", {}).get("name", "") for w in main_by_node.get(n0, [])}
+            src = {w.get("tags", {}).get("name", "") for w in src_ways}
             if not reaches_expressway(lw, link_at, on_way, src):
                 continue
         results.append({
@@ -254,7 +291,7 @@ def find_diverges(osm, with_candidates=False, jct_only=False):
         })
         if with_candidates:
             results[-1]["candidates"] = candidates_for(n0, p0, pred, nodes)
-    return results
+    return dedupe(results)
 
 
 def probe_nodes(ids):
