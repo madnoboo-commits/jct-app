@@ -45,21 +45,22 @@ def overpass_query(bbox):
     """)
 
 
-def overpass_raw(q):
+def overpass_raw(q, timeout=320, rounds=2):
+    """timeout はミラー1か所あたりの待ち時間。小さな問い合わせには短い値を渡す"""
     data = urllib.parse.urlencode({"data": q}).encode()
     last = None
-    for attempt in range(2):                      # ミラー一巡を2回まで
+    for attempt in range(rounds):                 # ミラー一巡を rounds 回まで
         for url in OVERPASS_MIRRORS:
             req = urllib.request.Request(
                 url, data, headers={"User-Agent": "jct-branch-app/0.1 (GitHub Actions)"})
             try:
-                with urllib.request.urlopen(req, timeout=320) as r:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
                     print(f"Overpass 取得成功: {url}", file=sys.stderr)
                     return json.load(r)
             except Exception as e:
                 last = e
                 print(f"Overpass 失敗 ({url}): {e}", file=sys.stderr)
-        if attempt == 0:
+        if attempt < rounds - 1:
             wait = 30
             print(f"{wait}秒待って再試行します…", file=sys.stderr)
             time.sleep(wait)
@@ -182,9 +183,9 @@ def find_diverges(osm, with_candidates=False):
 
 def probe_nodes(ids):
     """指定ノードが『どんな道路』に属しているかを、種別を問わず調べる"""
-    q = ("[out:json][timeout:180];node(id:" + ",".join(str(i) for i in ids) +
+    q = ("[out:json][timeout:60];node(id:" + ",".join(str(i) for i in ids) +
          ")->.n;way(bn.n);out body;")
-    osm = overpass_raw(q)
+    osm = overpass_raw(q, timeout=45)
     ways = [e for e in osm["elements"] if e["type"] == "way"]
     want = set(ids)
     byn = {}
@@ -207,8 +208,8 @@ def probe_nodes(ids):
 
 def probe_ways(ids):
     """指定wayの全タグを表示する(本線の種別を見分ける手がかりを探す)"""
-    q = "[out:json][timeout:180];way(id:" + ",".join(str(i) for i in ids) + ");out tags;"
-    osm = overpass_raw(q)
+    q = "[out:json][timeout:60];way(id:" + ",".join(str(i) for i in ids) + ");out tags;"
+    osm = overpass_raw(q, timeout=45)
     for w in [e for e in osm["elements"] if e["type"] == "way"]:
         t = w.get("tags", {})
         print(f"way {w['id']}  ({t.get('name','名称なし')})")
