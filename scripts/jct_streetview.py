@@ -24,9 +24,9 @@ OVERPASS_MIRRORS = [
     "https://overpass.osm.jp/api/interpreter",
 ]
 OVERPASS = OVERPASS_MIRRORS[0]
-DISTANCES = [300, 700]   # 分岐点の手前何mから見るか(直前の標識、予告標識を想定)
+DISTANCES = [100]        # 分岐点の手前何mから見るか
 PICK_SPAN = 500          # 看板さがしの対象: 分岐点の手前何mまで
-PICK_STEP = 25           # 候補地点の間隔(m)
+PICK_STEP = 20           # 候補地点の間隔(m)
 PICK_BACK = 20           # 看板が見つかった地点から、さらに何m手前を撮影地点にするか
 PITCH = 8                # 頭上の標識を見るため少し上向き
 FOV = 75
@@ -337,6 +337,8 @@ select,input,button{font:inherit;font-size:14px;padding:7px 9px;border-radius:6p
 input{flex:1;min-width:200px}
 input::placeholder{color:#cfe3d7}
 button{cursor:pointer;background:var(--on);color:var(--sign);font-weight:700;border-color:var(--on)}
+.sw{display:flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap}
+.sw input{flex:none;min-width:0;width:16px;height:16px}
 main{max-width:1100px;margin:0 auto;padding:12px}
 .note{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px;
  font-size:13px;line-height:1.7;color:var(--sub)}
@@ -361,6 +363,7 @@ footer{color:var(--sub);font-size:12px;text-align:center;padding:18px 12px 30px;
     <select id="jct"></select>
     <input id="key" type="password" placeholder="Google Maps APIキー（この端末にのみ保存）">
     <button id="save">読み込む</button>
+    <label class="sw"><input type="checkbox" id="back" checked> 20m下がる</label>
     <button id="exp">選択を書き出す</button>
   </div>
 </header>
@@ -421,10 +424,14 @@ function showResult(r){
   const d = picks[r.id];
   if(d === undefined){ $("result").innerHTML = ""; return; }
   const c = r.candidates.find(x => x.distance_m === d);
-  const p = c && c.pick;
-  if(!p){ $("result").innerHTML = `<div class="res">手前${d}mを選びましたが、そこから__BACK__m下がる地点が本線上にありません。もう少し手前を選んでください。</div>`; return; }
+  const useBack = $("back").checked;
+  // 20m下がらない場合は、選んだ地点そのものを撮影ポイントにする
+  const p = useBack ? (c && c.pick) : (c && c.heading !== null ? c : null);
+  if(!p){ $("result").innerHTML = `<div class="res">手前${d}mは撮影ポイントにできません（本線をさかのぼれないか、分岐点そのものです）。別の地点を選んでください。</div>`; return; }
+  const lead = useBack ? `看板は <b>手前${d}m</b>、撮影ポイントは <b>手前${p.distance_m}m</b>`
+                       : `撮影ポイントは <b>手前${p.distance_m}m</b>（選んだ地点そのまま）`;
   $("result").innerHTML = `<div class="res">
-    <b>${esc(r.junction||"名称なし")}</b> — 看板は <b>手前${d}m</b>、撮影ポイントは <b>手前${p.distance_m}m</b><br>
+    <b>${esc(r.junction||"名称なし")}</b> — ${lead}<br>
     <a href="${esc(svLink(p))}" target="_blank" rel="noopener">確定した撮影ポイントを開く</a><br>
     <code>${p.lat}, ${p.lng} / 方位${p.heading}度</code></div>`;
 }
@@ -432,6 +439,7 @@ function showResult(r){
 $("jct").innerHTML = DATA.map((r,i) =>
   `<option value="${i}">${esc(r.junction||"名称なし")}（${esc(r.mainline)}）</option>`).join("");
 $("jct").onchange = render;
+$("back").onchange = render;
 $("save").onclick = () => {
   try{ localStorage.setItem(LSK, $("key").value.trim()); }catch(e){}
   render();
@@ -439,8 +447,9 @@ $("save").onclick = () => {
 $("exp").onclick = () => {
   const out = DATA.filter(r => picks[r.id] !== undefined).map(r => {
     const c = r.candidates.find(x => x.distance_m === picks[r.id]);
+    const v = $("back").checked ? (c&&c.pick) : (c&&c.heading!==null ? c : null);
     return {id:r.id, junction:r.junction, mainline:r.mainline,
-            sign_distance_m:picks[r.id], view:(c&&c.pick)||null};
+            picked_distance_m:picks[r.id], back_off:$("back").checked, view:v||null};
   });
   const b = new Blob([JSON.stringify(out,null,1)], {type:"application/json"});
   const a = document.createElement("a");
