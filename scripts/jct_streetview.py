@@ -539,11 +539,11 @@ if __name__ == "__main__":
     ap.add_argument("--probe", help="指定ノードID(カンマ区切り)が属する道路を調べる")
     ap.add_argument("--keyword", default="", help="--diagnose で注目する分岐名")
     a = ap.parse_args()
-    if a.test or not (a.bbox or a.from_file):
-        self_test()
-        sys.exit()
     if a.probe:
         probe_nodes([int(x) for x in a.probe.split(",")])
+        sys.exit()
+    if a.test or not (a.bbox or a.from_file):
+        self_test()
         sys.exit()
     os.makedirs(a.outdir, exist_ok=True)
     osm = json.load(open(a.from_file, encoding="utf-8")) if a.from_file else \
