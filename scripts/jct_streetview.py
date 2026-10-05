@@ -13,7 +13,7 @@ JCT・IC分岐点ごとに、案内板が見えやすいストリートビュー
   python jct_streetview.py --bbox ... --key YOUR_GOOGLE_API_KEY     # パノラマ実在確認つき
   python jct_streetview.py --test                                  # 計算ロジックのテスト
 """
-import argparse, json, math, sys, time, urllib.parse, urllib.request
+import argparse, json, math, re, sys, time, urllib.parse, urllib.request
 from collections import Counter
 
 # 公開Overpassは混雑で 504/429 を返すことがあるため、複数のミラーを順に試す
@@ -21,7 +21,6 @@ OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
-    "https://overpass.osm.jp/api/interpreter",
 ]
 OVERPASS = OVERPASS_MIRRORS[0]
 DISTANCES = [100]        # 分岐点の手前何mから見るか
@@ -45,21 +44,22 @@ def overpass_query(bbox):
     """)
 
 
-def overpass_raw(q):
+def overpass_raw(q, timeout=320, rounds=2):
+    """timeout はミラー1か所あたりの待ち時間。小さな問い合わせには短い値を渡す"""
     data = urllib.parse.urlencode({"data": q}).encode()
     last = None
-    for attempt in range(2):                      # ミラー一巡を2回まで
+    for attempt in range(rounds):                 # ミラー一巡を rounds 回まで
         for url in OVERPASS_MIRRORS:
             req = urllib.request.Request(
                 url, data, headers={"User-Agent": "jct-branch-app/0.1 (GitHub Actions)"})
             try:
-                with urllib.request.urlopen(req, timeout=320) as r:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
                     print(f"Overpass 取得成功: {url}", file=sys.stderr)
                     return json.load(r)
             except Exception as e:
                 last = e
                 print(f"Overpass 失敗 ({url}): {e}", file=sys.stderr)
-        if attempt == 0:
+        if attempt < rounds - 1:
             wait = 30
             print(f"{wait}秒待って再試行します…", file=sys.stderr)
             time.sleep(wait)
@@ -125,6 +125,54 @@ def build_graph(osm):
     return nodes, main, links, pred, succ, main_name, skipped
 
 
+def is_expressway(way):
+    """高速道路・自動車専用道の本線か。一般道(国道1号など)と区別する。
+
+    motorway は無条件。trunk は motorroad=yes、または高速道路ナンバリング
+    (E1 など)を持つものだけを自動車専用道とみなす。
+    """
+    t = way.get("tags", {})
+    hw = t.get("highway", "")
+    if hw == "motorway":
+        return True
+    if hw != "trunk":
+        return False
+    if t.get("motorroad") == "yes":
+        return True
+    return any(re.fullmatch(r"E\d+[A-Z]?", x.strip())
+               for x in t.get("ref", "").split(";") if x.strip())
+
+
+def reaches_expressway(lw, links, on_way, src_names, max_hops=12):
+    """ランプをたどって、分岐元とは別の高速道路の本線に出るかを調べる。
+
+    出れば JCT、どこにも出ずに終われば(=一般道へ降りる) IC とみなす。
+    一般道は Overpass で取得していないため、データ上は自然に行き止まりになる。
+    """
+    seen, queue = {lw["id"]}, [(lw, 0)]
+    while queue:
+        w, hop = queue.pop(0)
+        seq = directed_nodes(w) or w["nodes"]
+        for nid in seq[1:]:                      # 始点は分岐元なので除く
+            for other in on_way.get(nid, []):
+                if other.get("tags", {}).get("highway", "").endswith("_link"):
+                    continue
+                if is_expressway(other) and other.get("tags", {}).get("name", "") not in src_names:
+                    return True
+        if hop >= max_hops:
+            continue
+        for nid in seq[1:]:
+            for nxt in links.get(nid, []):
+                if nxt["id"] in seen:
+                    continue
+                # ランプの始点がこのノードのものだけを前方向としてたどる
+                if (directed_nodes(nxt) or nxt["nodes"])[0] != nid:
+                    continue
+                seen.add(nxt["id"])
+                queue.append((nxt, hop + 1))
+    return False
+
+
 def candidates_for(n0, p0, pred, nodes, span=PICK_SPAN, step=PICK_STEP, back=PICK_BACK):
     """分岐点の手前 span m までを step m ごとに刻み、各地点の視点を作る。
 
@@ -146,8 +194,65 @@ def candidates_for(n0, p0, pred, nodes, span=PICK_SPAN, step=PICK_STEP, back=PIC
     return out
 
 
-def find_diverges(osm, with_candidates=False):
+DEDUPE_DIST = 150        # 同一分岐とみなす距離(m)
+DEDUPE_ANGLE = 45        # 同一分岐とみなす進行方向の差(度)
+
+
+def angle_diff(a, b):
+    d = abs(a - b) % 360
+    return min(d, 360 - d)
+
+
+def dedupe(results):
+    """同じ分岐が複数のランプwayで重複して出るのをまとめる。
+
+    上下線は進行方向が大きく違うため、向きが近いものだけを同一とみなす。
+    """
+    out = []
+    for r in results:
+        h = r["views"][0]["heading"]
+        same = None
+        for o in out:
+            if (o["junction"], o["mainline"], o["destination"]) != \
+               (r["junction"], r["mainline"], r["destination"]):
+                continue
+            if haversine((o["lat"], o["lng"]), (r["lat"], r["lng"])) > DEDUPE_DIST:
+                continue
+            if angle_diff(o["views"][0]["heading"], h) > DEDUPE_ANGLE:
+                continue
+            same = o
+            break
+        if same is None:
+            out.append(r)
+    return out
+
+
+def find_diverges(osm, with_candidates=False, jct_only=False):
     nodes, main, links, pred, succ, main_name, _ = build_graph(osm)
+
+    # ノード -> そのノードを含むway(本線・ランプとも)
+    on_way, link_at = {}, {}
+    for w in main + links:
+        for nid in w["nodes"]:
+            on_way.setdefault(nid, []).append(w)
+    for w in links:
+        for nid in w["nodes"]:
+            link_at.setdefault(nid, []).append(w)
+    # 本線wayを名前で引けるようにする(分岐元の路線名の集合を作るため)
+    main_by_node = {}
+    for w in main:
+        for nid in w["nodes"]:
+            main_by_node.setdefault(nid, []).append(w)
+
+    if jct_only:
+        seen_names = {}
+        for w in main:
+            seen_names.setdefault(w.get("tags", {}).get("name", "(名称なし)"),
+                                  []).append(is_expressway(w))
+        print("--- 本線の分類 ---", file=sys.stderr)
+        for nm, flags in sorted(seen_names.items()):
+            kind = "高速" if any(flags) else "一般道"
+            print(f"  {kind}  {nm}", file=sys.stderr)
 
     results = []
     for lw in links:
@@ -167,6 +272,15 @@ def find_diverges(osm, with_candidates=False):
                               "heading": round(bearing(pt, p0)), "pitch": PITCH})
         if not views:
             continue
+        if jct_only:
+            src_ways = main_by_node.get(n0, [])
+            # 分岐元そのものが高速でなければJCTではない(一般道から高速への入口を除く)
+            if not any(is_expressway(w) for w in src_ways):
+                continue
+            # 分岐元の路線名(同じ本線の別wayを「別の高速」と誤判定しないため)
+            src = {w.get("tags", {}).get("name", "") for w in src_ways}
+            if not reaches_expressway(lw, link_at, on_way, src):
+                continue
         results.append({
             "diverge_node": n0,
             "lat": p0[0], "lng": p0[1],
@@ -177,14 +291,14 @@ def find_diverges(osm, with_candidates=False):
         })
         if with_candidates:
             results[-1]["candidates"] = candidates_for(n0, p0, pred, nodes)
-    return results
+    return dedupe(results)
 
 
 def probe_nodes(ids):
     """指定ノードが『どんな道路』に属しているかを、種別を問わず調べる"""
-    q = ("[out:json][timeout:180];node(id:" + ",".join(str(i) for i in ids) +
+    q = ("[out:json][timeout:60];node(id:" + ",".join(str(i) for i in ids) +
          ")->.n;way(bn.n);out body;")
-    osm = overpass_raw(q)
+    osm = overpass_raw(q, timeout=45)
     ways = [e for e in osm["elements"] if e["type"] == "way"]
     want = set(ids)
     byn = {}
@@ -202,6 +316,18 @@ def probe_nodes(ids):
             print(f"    way {w['id']:>11}  highway={hw:<16} {t.get('name','')}  {extra}")
         if not byn.get(nid):
             print("    (属するwayが見つからない)")
+        print()
+
+
+def probe_ways(ids):
+    """指定wayの全タグを表示する(本線の種別を見分ける手がかりを探す)"""
+    q = "[out:json][timeout:60];way(id:" + ",".join(str(i) for i in ids) + ");out tags;"
+    osm = overpass_raw(q, timeout=45)
+    for w in [e for e in osm["elements"] if e["type"] == "way"]:
+        t = w.get("tags", {})
+        print(f"way {w['id']}  ({t.get('name','名称なし')})")
+        for k in sorted(t):
+            print(f"    {k} = {t[k]}")
         print()
 
 
@@ -546,10 +672,16 @@ if __name__ == "__main__":
     ap.add_argument("--diagnose", action="store_true", help="分岐が検出されない原因を調べる")
     ap.add_argument("--picker", action="store_true", help="看板の位置を選ぶ確認用ページも出力する")
     ap.add_argument("--probe", help="指定ノードID(カンマ区切り)が属する道路を調べる")
+    ap.add_argument("--probe-ways", dest="probe_ways", help="指定wayID(カンマ区切り)の全タグを表示する")
+    ap.add_argument("--jct-only", dest="jct_only", action="store_true",
+                    help="高速道路同士の分岐(JCT)だけに絞る")
     ap.add_argument("--keyword", default="", help="--diagnose で注目する分岐名")
     a = ap.parse_args()
     if a.probe:
         probe_nodes([int(x) for x in a.probe.split(",")])
+        sys.exit()
+    if a.probe_ways:
+        probe_ways([int(x) for x in a.probe_ways.split(",")])
         sys.exit()
     if a.test or not (a.bbox or a.from_file):
         self_test()
@@ -560,7 +692,7 @@ if __name__ == "__main__":
     if a.diagnose:
         diagnose(osm, a.keyword)
         sys.exit()
-    res = find_diverges(osm, with_candidates=a.picker)
+    res = find_diverges(osm, with_candidates=a.picker, jct_only=a.jct_only)
     if a.key:
         for r in res:
             for v in r["views"]:

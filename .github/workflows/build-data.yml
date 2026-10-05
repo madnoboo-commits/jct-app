@@ -34,7 +34,7 @@ jobs:
           BBOX: ${{ inputs.bbox }}
           KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
         run: |
-          ARGS=(--bbox "$BBOX" --region "$REGION" --outdir docs/data --picker)
+          ARGS=(--bbox "$BBOX" --region "$REGION" --outdir docs/data --picker --jct-only)
           if [ -n "$KEY" ]; then ARGS+=(--key "$KEY"); fi
           python scripts/jct_streetview.py "${ARGS[@]}"
 
