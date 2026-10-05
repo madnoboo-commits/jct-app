@@ -14,6 +14,7 @@ JCT・IC分岐点ごとに、案内板が見えやすいストリートビュー
   python jct_streetview.py --test                                  # 計算ロジックのテスト
 """
 import argparse, json, math, sys, time, urllib.parse, urllib.request
+from collections import Counter
 
 # 公開Overpassは混雑で 504/429 を返すことがあるため、複数のミラーを順に試す
 OVERPASS_MIRRORS = [
@@ -93,7 +94,8 @@ def directed_nodes(way):
     return None
 
 
-def find_diverges(osm):
+def build_graph(osm):
+    """OSMの生データから、本線の有向グラフと分岐ランプを組み立てる"""
     nodes = {e["id"]: e for e in osm["elements"] if e["type"] == "node"}
     ways = [e for e in osm["elements"] if e["type"] == "way"]
     main, links = [], []
@@ -103,15 +105,22 @@ def find_diverges(osm):
 
     # 本線の有向グラフ: ノード -> 直前ノード(逆向きにたどるため)
     pred, succ, main_name = {}, {}, {}
+    skipped = []                      # 向きが決まらず対象外になった本線
     for w in main:
         seq = directed_nodes(w)
         if not seq:
+            skipped.append(w)
             continue
         for a, b in zip(seq, seq[1:]):
             pred.setdefault(b, a)
             succ.setdefault(a, b)
         for nid in seq:
             main_name.setdefault(nid, w.get("tags", {}).get("name", ""))
+    return nodes, main, links, pred, succ, main_name, skipped
+
+
+def find_diverges(osm):
+    nodes, main, links, pred, succ, main_name, _ = build_graph(osm)
 
     results = []
     for lw in links:
@@ -140,6 +149,52 @@ def find_diverges(osm):
             "views": views,
         })
     return results
+
+
+def diagnose(osm, keyword=""):
+    """各ランプが分岐として採用された/されなかった理由を一覧で出す(原因調査用)"""
+    nodes, main, links, pred, succ, main_name, skipped = build_graph(osm)
+    # ノードが、どの本線wayに含まれるか
+    on_main = {}
+    for w in main:
+        for nid in w["nodes"]:
+            on_main.setdefault(nid, []).append(w)
+
+    print(f"本線way {len(main)}本 / ランプway {len(links)}本 / ノード {len(nodes)}個")
+    print(f"向きが決まらず本線グラフから除外されたway: {len(skipped)}本")
+    for w in skipped[:15]:
+        t = w.get("tags", {})
+        print(f"    way {w['id']} highway={t.get('highway')} oneway={t.get('oneway')!r} name={t.get('name','')}")
+
+    reasons = Counter()
+    print("\n--- ランプごとの判定 ---")
+    for lw in links:
+        seq = directed_nodes(lw) or lw["nodes"]
+        n0 = seq[0]
+        lt = lw.get("tags", {})
+        nt = nodes.get(n0, {}).get("tags", {})
+        label = nt.get("name") or nt.get("ref") or lt.get("destination") or ""
+        has_p, has_s = n0 in pred, n0 in succ
+        if has_p and has_s:
+            why = "採用"
+        elif not on_main.get(n0):
+            why = "不採用: 始点が本線上のノードでない"
+        elif not has_p and not has_s:
+            why = "不採用: 始点の本線が有向グラフに無い(onewayなし等)"
+        elif not has_p:
+            why = "不採用: 本線をさかのぼれない(始点が本線wayの先頭)"
+        else:
+            why = "不採用: 本線が先に続かない(始点が本線wayの末尾)"
+        reasons[why] += 1
+        if not keyword or keyword in (label + lt.get("name", "")):
+            mains = on_main.get(n0, [])
+            mn = "/".join(sorted({w.get("tags", {}).get("name", "?") for w in mains})) or "(なし)"
+            print(f"  way {lw['id']:>11} 始点node {n0:>11} [{label or '名称なし'}] "
+                  f"本線={mn} -> {why}")
+
+    print("\n--- 判定の内訳 ---")
+    for why, c in reasons.most_common():
+        print(f"  {c:>4}本  {why}")
 
 
 def walk_back(n0, D, pred, nodes):
@@ -259,6 +314,8 @@ if __name__ == "__main__":
     ap.add_argument("--outdir", default=".")
     ap.add_argument("--test", action="store_true")
     ap.add_argument("--from-file", help="Overpassの代わりに保存済みJSONを読む(テスト用)")
+    ap.add_argument("--diagnose", action="store_true", help="分岐が検出されない原因を調べる")
+    ap.add_argument("--keyword", default="", help="--diagnose で注目する分岐名")
     a = ap.parse_args()
     if a.test or not (a.bbox or a.from_file):
         self_test()
@@ -266,6 +323,9 @@ if __name__ == "__main__":
     os.makedirs(a.outdir, exist_ok=True)
     osm = json.load(open(a.from_file, encoding="utf-8")) if a.from_file else \
         overpass_query([float(x) for x in a.bbox.split(",")])
+    if a.diagnose:
+        diagnose(osm, a.keyword)
+        sys.exit()
     res = find_diverges(osm)
     if a.key:
         for r in res:
