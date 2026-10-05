@@ -38,7 +38,7 @@ def overpass_query(bbox):
     [out:json][timeout:300];
     (
       way["highway"="motorway"]({s},{w},{n},{e});
-      way["highway"="trunk"]["motorroad"="yes"]({s},{w},{n},{e});
+      way["highway"="trunk"]({s},{w},{n},{e});
       way["highway"~"^(motorway|trunk)_link$"]({s},{w},{n},{e});
     );
     out body; >; out body qt;

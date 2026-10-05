@@ -28,7 +28,22 @@ jobs:
       - name: 計算ロジックのテスト
         run: python scripts/jct_streetview.py --test
 
-      - name: 【一時】取りこぼしノードの接続先を調べる
+      - name: OpenStreetMap から分岐を取得
+        env:
+          REGION: ${{ inputs.region }}
+          BBOX: ${{ inputs.bbox }}
+          KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
         run: |
-          python scripts/jct_streetview.py --probe \
-            283016755,304036448,273331618,1802945739,980047475,273331636,746385817,5539265689
+          ARGS=(--bbox "$BBOX" --region "$REGION" --outdir docs/data --picker)
+          if [ -n "$KEY" ]; then ARGS+=(--key "$KEY"); fi
+          python scripts/jct_streetview.py "${ARGS[@]}"
+
+      - name: 結果を保存
+        env:
+          REGION: ${{ inputs.region }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/data
+          git diff --cached --quiet || git commit -m "分岐データ更新: $REGION"
+          git push
