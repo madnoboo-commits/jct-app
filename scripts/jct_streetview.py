@@ -34,7 +34,7 @@ FOV = 75
 
 def overpass_query(bbox):
     s, w, n, e = bbox
-    q = f"""
+    return overpass_raw(f"""
     [out:json][timeout:300];
     (
       way["highway"="motorway"]({s},{w},{n},{e});
@@ -42,7 +42,10 @@ def overpass_query(bbox):
       way["highway"~"^(motorway|trunk)_link$"]({s},{w},{n},{e});
     );
     out body; >; out body qt;
-    """
+    """)
+
+
+def overpass_raw(q):
     data = urllib.parse.urlencode({"data": q}).encode()
     last = None
     for attempt in range(2):                      # ミラー一巡を2回まで
@@ -175,6 +178,31 @@ def find_diverges(osm, with_candidates=False):
         if with_candidates:
             results[-1]["candidates"] = candidates_for(n0, p0, pred, nodes)
     return results
+
+
+def probe_nodes(ids):
+    """指定ノードが『どんな道路』に属しているかを、種別を問わず調べる"""
+    q = ("[out:json][timeout:180];node(id:" + ",".join(str(i) for i in ids) +
+         ")->.n;way(bn.n);out body;")
+    osm = overpass_raw(q)
+    ways = [e for e in osm["elements"] if e["type"] == "way"]
+    want = set(ids)
+    byn = {}
+    for w in ways:
+        for nid in w["nodes"]:
+            if nid in want:
+                byn.setdefault(nid, []).append(w)
+    print(f"調べたノード {len(ids)}個 / 見つかったway {len(ways)}本\n")
+    for nid in ids:
+        print(f"node {nid}:")
+        for w in byn.get(nid, []):
+            t = w.get("tags", {})
+            hw = t.get("highway", "(highwayタグなし)")
+            extra = " ".join(f"{k}={t[k]}" for k in ("motorroad", "oneway") if k in t)
+            print(f"    way {w['id']:>11}  highway={hw:<16} {t.get('name','')}  {extra}")
+        if not byn.get(nid):
+            print("    (属するwayが見つからない)")
+        print()
 
 
 def diagnose(osm, keyword=""):
@@ -508,10 +536,14 @@ if __name__ == "__main__":
     ap.add_argument("--from-file", help="Overpassの代わりに保存済みJSONを読む(テスト用)")
     ap.add_argument("--diagnose", action="store_true", help="分岐が検出されない原因を調べる")
     ap.add_argument("--picker", action="store_true", help="看板の位置を選ぶ確認用ページも出力する")
+    ap.add_argument("--probe", help="指定ノードID(カンマ区切り)が属する道路を調べる")
     ap.add_argument("--keyword", default="", help="--diagnose で注目する分岐名")
     a = ap.parse_args()
     if a.test or not (a.bbox or a.from_file):
         self_test()
+        sys.exit()
+    if a.probe:
+        probe_nodes([int(x) for x in a.probe.split(",")])
         sys.exit()
     os.makedirs(a.outdir, exist_ok=True)
     osm = json.load(open(a.from_file, encoding="utf-8")) if a.from_file else \

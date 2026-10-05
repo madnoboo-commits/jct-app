@@ -28,7 +28,7 @@ jobs:
       - name: 計算ロジックのテスト
         run: python scripts/jct_streetview.py --test
 
-      - name: 【一時】分岐の検出もれを調べる
-        env:
-          BBOX: ${{ inputs.bbox }}
-        run: python scripts/jct_streetview.py --diagnose --bbox "$BBOX" --keyword ""
+      - name: 【一時】取りこぼしノードの接続先を調べる
+        run: |
+          python scripts/jct_streetview.py --probe \
+            283016755,304036448,273331618,1802945739,980047475,273331636,746385817,5539265689
