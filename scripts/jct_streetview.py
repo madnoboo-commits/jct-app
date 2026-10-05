@@ -13,9 +13,16 @@ JCT・IC分岐点ごとに、案内板が見えやすいストリートビュー
   python jct_streetview.py --bbox ... --key YOUR_GOOGLE_API_KEY     # パノラマ実在確認つき
   python jct_streetview.py --test                                  # 計算ロジックのテスト
 """
-import argparse, json, math, sys, urllib.parse, urllib.request
+import argparse, json, math, sys, time, urllib.parse, urllib.request
 
-OVERPASS = "https://overpass-api.de/api/interpreter"
+# 公開Overpassは混雑で 504/429 を返すことがあるため、複数のミラーを順に試す
+OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.osm.jp/api/interpreter",
+]
+OVERPASS = OVERPASS_MIRRORS[0]
 DISTANCES = [300, 700]   # 分岐点の手前何mから見るか(直前の標識、予告標識を想定)
 PITCH = 8                # 頭上の標識を見るため少し上向き
 FOV = 75
@@ -33,9 +40,26 @@ def overpass_query(bbox):
     out body; >; out body qt;
     """
     data = urllib.parse.urlencode({"data": q}).encode()
-    req = urllib.request.Request(OVERPASS, data, headers={"User-Agent": "jct-branch-app/0.1 (GitHub Actions)"})
-    with urllib.request.urlopen(req, timeout=320) as r:
-        return json.load(r)
+    last = None
+    for attempt in range(2):                      # ミラー一巡を2回まで
+        for url in OVERPASS_MIRRORS:
+            req = urllib.request.Request(
+                url, data, headers={"User-Agent": "jct-branch-app/0.1 (GitHub Actions)"})
+            try:
+                with urllib.request.urlopen(req, timeout=320) as r:
+                    print(f"Overpass 取得成功: {url}", file=sys.stderr)
+                    return json.load(r)
+            except Exception as e:
+                last = e
+                print(f"Overpass 失敗 ({url}): {e}", file=sys.stderr)
+        if attempt == 0:
+            wait = 30
+            print(f"{wait}秒待って再試行します…", file=sys.stderr)
+            time.sleep(wait)
+    raise SystemExit(
+        f"Overpass からデータを取得できませんでした（最後のエラー: {last}）。\n"
+        "サーバーの混雑が原因のことが多いため、数分おいてもう一度実行してください。\n"
+        "範囲(--bbox)を狭めると成功しやすくなります。")
 
 
 def haversine(a, b):
@@ -157,18 +181,29 @@ def sv_link(v):
     return "https://www.google.com/maps/@?" + urllib.parse.urlencode(p)
 
 
+def esc(s):
+    """OSMのタグは外部データなので、HTMLに入れる前にエスケープする"""
+    return (str(s if s is not None else "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
 def write_html(results, path):
     rows = []
     for r in results:
-        links = " ".join(f'<a href="{sv_link(v)}" target="_blank">手前{v["distance_m"]}m'
-                         + (f' ({v["pano_date"]})' if v.get("pano_date") else "") + "</a>"
-                         for v in r["views"])
-        rows.append(f"<tr><td>{r['junction']}</td><td>{r['mainline']}</td>"
-                    f"<td>{r['destination']}</td><td>{links}</td></tr>")
+        links = " ".join(f'<a href="{esc(sv_link(v))}" target="_blank" rel="noopener">手前{v["distance_m"]}m'
+                         + (f' ({esc(v["pano_date"])})' if v.get("pano_date") else "") + "</a>"
+                         for v in sorted(r["views"], key=lambda v: -v["distance_m"]))
+        rows.append(f"<tr><td>{esc(r['junction'])}</td><td>{esc(r['mainline'])}</td>"
+                    f"<td>{esc(r['destination'].replace(';', ' ・ '))}</td><td>{links}</td></tr>")
     html = ("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
-            "<style>body{font-family:sans-serif;padding:12px}td,th{border-bottom:1px solid #ddd;padding:6px;font-size:14px}</style>"
+            f"<title>分岐一覧（{len(rows)}件）</title>"
+            "<style>body{font-family:sans-serif;padding:12px}td,th{border-bottom:1px solid #ddd;padding:6px;font-size:14px}"
+            "a{display:inline-block;margin-right:8px}</style>"
+            f"<p>{len(rows)} 件の分岐</p>"
             "<table><tr><th>分岐</th><th>本線</th><th>行き先</th><th>ストリートビュー</th></tr>"
-            + "".join(rows) + "</table>")
+            + "".join(rows) + "</table>"
+            "<p style='font-size:12px;color:#666'>道路データ &copy; "
+            "<a href='https://www.openstreetmap.org/copyright'>OpenStreetMap contributors</a>（ODbL）</p>")
     open(path, "w", encoding="utf-8").write(html)
 
 
@@ -244,5 +279,7 @@ if __name__ == "__main__":
             v["url"] = sv_link(v)
     out = os.path.join(a.outdir, a.region + ".json")
     json.dump(res, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    html = os.path.join(a.outdir, a.region + ".html")
+    write_html(res, html)
     update_index(a.outdir)
-    print(f"{len(res)} 件の分岐を出力しました: {out}")
+    print(f"{len(res)} 件の分岐を出力しました: {out} / {html}")
