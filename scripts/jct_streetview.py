@@ -185,6 +185,11 @@ def diagnose(osm, keyword=""):
     for w in main:
         for nid in w["nodes"]:
             on_main.setdefault(nid, []).append(w)
+    # ランプの「始点以外」のノード: ここから分かれるのはランプ同士の枝分かれ
+    on_link = set()
+    for w in links:
+        seq = directed_nodes(w) or w["nodes"]
+        on_link.update(seq[1:])
 
     print(f"本線way {len(main)}本 / ランプway {len(links)}本 / ノード {len(nodes)}個")
     print(f"向きが決まらず本線グラフから除外されたway: {len(skipped)}本")
@@ -204,7 +209,11 @@ def diagnose(osm, keyword=""):
         if has_p and has_s:
             why = "採用"
         elif not on_main.get(n0):
-            why = "不採用: 始点が本線上のノードでない"
+            # 本線上にない場合、別のランプ上なのか、何にも繋がっていないのかを分ける
+            if n0 in on_link:
+                why = "不採用: ランプの途中(分岐点ではない)"
+            else:
+                why = "不採用: 接続先の道路をOverpassで取得していない"
         elif not has_p and not has_s:
             why = "不採用: 始点の本線が有向グラフに無い(onewayなし等)"
         elif not has_p:
@@ -221,6 +230,20 @@ def diagnose(osm, keyword=""):
     print("\n--- 判定の内訳 ---")
     for why, c in reasons.most_common():
         print(f"  {c:>4}本  {why}")
+
+    # 取得もれで落ちた分岐のうち、名前がついているもの(本来ほしい分岐)
+    missing = {}
+    for lw in links:
+        n0 = (directed_nodes(lw) or lw["nodes"])[0]
+        if n0 in on_main or n0 in on_link:
+            continue
+        nt = nodes.get(n0, {}).get("tags", {})
+        name = nt.get("name") or nt.get("ref")
+        if name:
+            missing.setdefault(name, []).append(n0)
+    print(f"\n--- 取得もれで落ちた『名前つき』分岐: {len(missing)}種類 ---")
+    for name, ids in sorted(missing.items()):
+        print(f"  {name}  (node {', '.join(str(i) for i in sorted(set(ids)))})")
 
 
 def walk_back(n0, D, pred, nodes):
