@@ -13,7 +13,7 @@ JCT・IC分岐点ごとに、案内板が見えやすいストリートビュー
   python jct_streetview.py --bbox ... --key YOUR_GOOGLE_API_KEY     # パノラマ実在確認つき
   python jct_streetview.py --test                                  # 計算ロジックのテスト
 """
-import argparse, json, math, re, sys, time, urllib.parse, urllib.request
+import argparse, json, math, os, re, sys, time, urllib.parse, urllib.request
 from collections import Counter
 
 # 公開Overpassは混雑で 504/429 を返すことがあるため、複数のミラーを順に試す
@@ -430,6 +430,35 @@ def snap_to_pano(view, target, key):
                 heading=round(bearing(loc, target)))
 
 
+def apply_picks(results, path):
+    """看板さがしで選んだ撮影ポイントを、分岐データに反映する。
+
+    picker ページが書き出した picks.json を読み、分岐ノードが一致する
+    ものの撮影ポイントを差し替える。選んでいない分岐は既定のまま。
+    """
+    if not path or not os.path.exists(path):
+        return 0
+    try:
+        picks = json.load(open(path, encoding="utf-8"))
+    except Exception as e:
+        print(f"picks を読めませんでした ({path}): {e}", file=sys.stderr)
+        return 0
+    by_id = {p["id"]: p for p in picks if isinstance(p, dict) and p.get("view") and "id" in p}
+    n = 0
+    for r in results:
+        p = by_id.get(r["diverge_node"])
+        if not p:
+            continue
+        v = {k: p["view"][k] for k in ("distance_m", "lat", "lng", "heading", "pitch")
+             if k in p["view"]}
+        v["picked"] = True                 # 画面で「看板位置から選択」と出すため
+        r["views"] = [v]
+        n += 1
+    if n:
+        print(f"看板さがしの選択を {n} 件反映しました: {path}", file=sys.stderr)
+    return n
+
+
 def sv_link(v):
     p = {"api": 1, "map_action": "pano", "heading": v["heading"], "pitch": v["pitch"], "fov": FOV}
     if v.get("pano"):
@@ -661,7 +690,6 @@ def update_index(outdir):
 
 
 if __name__ == "__main__":
-    import os
     ap = argparse.ArgumentParser()
     ap.add_argument("--bbox", help="南緯,西経,北緯,東経")
     ap.add_argument("--key", help="Google Maps APIキー(任意)")
@@ -675,6 +703,8 @@ if __name__ == "__main__":
     ap.add_argument("--probe-ways", dest="probe_ways", help="指定wayID(カンマ区切り)の全タグを表示する")
     ap.add_argument("--jct-only", dest="jct_only", action="store_true",
                     help="高速道路同士の分岐(JCT)だけに絞る")
+    ap.add_argument("--picks", help="看板さがしで書き出した picks.json "
+                                    "(既定: <outdir>/<地域名>_picks.json があれば自動で読む)")
     ap.add_argument("--keyword", default="", help="--diagnose で注目する分岐名")
     a = ap.parse_args()
     if a.probe:
@@ -693,6 +723,7 @@ if __name__ == "__main__":
         diagnose(osm, a.keyword)
         sys.exit()
     res = find_diverges(osm, with_candidates=a.picker, jct_only=a.jct_only)
+    apply_picks(res, a.picks or os.path.join(a.outdir, a.region + "_picks.json"))
     if a.key:
         for r in res:
             for v in r["views"]:

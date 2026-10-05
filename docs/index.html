@@ -75,7 +75,8 @@ function render(){
   $("status").textContent = `${hit.length} か所の分岐`;
   $("list").innerHTML = hit.map(r => {
     const views = [...r.views].sort((a,b)=>b.distance_m-a.distance_m).map(v =>
-      `<a class="sv" href="${esc(v.url)}" target="_blank" rel="noopener">${v.distance_m}m手前<span>${v.pano_date ? esc(v.pano_date)+" 撮影" : "ストリートビュー"}</span></a>`).join("");
+      `<a class="sv" href="${esc(v.url)}" target="_blank" rel="noopener">${v.distance_m}m手前<span>${
+         v.pano_date ? esc(v.pano_date)+" 撮影" : v.picked ? "看板位置から選択" : "ストリートビュー"}</span></a>`).join("");
     const map = `https://www.google.com/maps/search/?api=1&query=${r.lat},${r.lng}`;
     return `<article class="row">
       <div><span class="plate">${esc(r.junction || "名称なし")}</span><span class="main">${esc(r.mainline)}</span></div>
