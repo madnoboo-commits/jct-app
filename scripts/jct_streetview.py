@@ -25,6 +25,9 @@ OVERPASS_MIRRORS = [
 ]
 OVERPASS = OVERPASS_MIRRORS[0]
 DISTANCES = [300, 700]   # 分岐点の手前何mから見るか(直前の標識、予告標識を想定)
+PICK_SPAN = 500          # 看板さがしの対象: 分岐点の手前何mまで
+PICK_STEP = 25           # 候補地点の間隔(m)
+PICK_BACK = 20           # 看板が見つかった地点から、さらに何m手前を撮影地点にするか
 PITCH = 8                # 頭上の標識を見るため少し上向き
 FOV = 75
 
@@ -119,7 +122,28 @@ def build_graph(osm):
     return nodes, main, links, pred, succ, main_name, skipped
 
 
-def find_diverges(osm):
+def candidates_for(n0, p0, pred, nodes, span=PICK_SPAN, step=PICK_STEP, back=PICK_BACK):
+    """分岐点の手前 span m までを step m ごとに刻み、各地点の視点を作る。
+
+    各候補には「そこから更に back m 下がった地点」(pick)を持たせる。
+    看板が見えた最初の地点を選べば、その pick がそのまま撮影地点になる。
+    """
+    out = []
+    for d in range(0, span + 1, step):
+        pt = walk_back(n0, d, pred, nodes) if d else p0
+        if not pt:
+            break                      # 本線をそこまでさかのぼれない
+        c = {"distance_m": d, "lat": round(pt[0], 6), "lng": round(pt[1], 6),
+             "heading": round(bearing(pt, p0)) if d else None, "pitch": PITCH}
+        bp = walk_back(n0, d + back, pred, nodes)
+        if bp:
+            c["pick"] = {"distance_m": d + back, "lat": round(bp[0], 6), "lng": round(bp[1], 6),
+                         "heading": round(bearing(bp, p0)), "pitch": PITCH}
+        out.append(c)
+    return out
+
+
+def find_diverges(osm, with_candidates=False):
     nodes, main, links, pred, succ, main_name, _ = build_graph(osm)
 
     results = []
@@ -148,6 +172,8 @@ def find_diverges(osm):
             "destination": lt.get("destination") or lt.get("destination:ref") or lt.get("name") or "",
             "views": views,
         })
+        if with_candidates:
+            results[-1]["candidates"] = candidates_for(n0, p0, pred, nodes)
     return results
 
 
@@ -242,6 +268,149 @@ def esc(s):
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
+PICKER_TMPL = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>看板さがし</title>
+<style>
+:root{--sign:#0a6b3b;--on:#fff;--ink:#23272a;--sub:#5d666b;--bg:#eceeec;--card:#fff;--line:#d5d9d6;--mark:#e8b10a;
+ font-family:"BIZ UDPGothic","Hiragino Sans","Yu Gothic UI",system-ui,sans-serif;color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--ink:#e7eae8;--sub:#a3aca8;--bg:#161a19;--card:#1f2423;--line:#333a38}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink)}
+header{position:sticky;top:0;z-index:5;background:var(--sign);color:var(--on);padding:12px 16px}
+h1{margin:0 0 8px;font-size:18px}
+.ctl{display:flex;gap:8px;flex-wrap:wrap}
+select,input,button{font:inherit;font-size:14px;padding:7px 9px;border-radius:6px;border:2px solid var(--on);
+ background:var(--sign);color:var(--on)}
+input{flex:1;min-width:200px}
+input::placeholder{color:#cfe3d7}
+button{cursor:pointer;background:var(--on);color:var(--sign);font-weight:700;border-color:var(--on)}
+main{max-width:1100px;margin:0 auto;padding:12px}
+.note{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px;
+ font-size:13px;line-height:1.7;color:var(--sub)}
+.note b{color:var(--ink)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.cell{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;cursor:pointer;
+ position:relative;padding:0;text-align:left}
+.cell.sel{outline:4px solid var(--mark);outline-offset:-4px}
+.cell img{width:100%;aspect-ratio:4/3;object-fit:cover;display:block;background:#0003}
+.cell .ph{width:100%;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;
+ color:var(--sub);font-size:13px;text-align:center;padding:10px}
+.cap{padding:7px 9px;font-size:13px;display:flex;justify-content:space-between;align-items:center;gap:6px}
+.cap b{font-size:15px}
+.cap a{color:var(--sub);font-size:12px}
+.res{background:var(--card);border:2px solid var(--sign);border-radius:10px;padding:12px;margin:12px 0;font-size:14px;line-height:1.8}
+.res code{font-size:12px;word-break:break-all}
+footer{color:var(--sub);font-size:12px;text-align:center;padding:18px 12px 30px;line-height:1.7}
+</style></head><body>
+<header>
+  <h1>看板さがし</h1>
+  <div class="ctl">
+    <select id="jct"></select>
+    <input id="key" type="password" placeholder="Google Maps APIキー（この端末にのみ保存）">
+    <button id="save">読み込む</button>
+    <button id="exp">選択を書き出す</button>
+  </div>
+</header>
+<main>
+  <div class="note">
+    分岐点の手前 <b>__SPAN__m</b> から分岐点までを <b>__STEP__m</b> ごとに並べています。
+    画像を手前（左上）から順に見て、<b>分岐案内の看板が写っている地点のうち、分岐点に最も近いもの</b>を選んでください。
+    選ぶと、そこから <b>__BACK__m</b> 手前に下がった地点が撮影ポイントとして確定します。<br>
+    APIキーは <b>この端末のブラウザにのみ</b>保存され、送信も保存もされません。入れない場合は画像が出ず、リンクだけになります。
+  </div>
+  <div id="result"></div>
+  <div class="grid" id="grid"></div>
+</main>
+<footer>道路データ &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>（ODbL）</footer>
+<script>
+const DATA = __DATA__;
+const $ = i => document.getElementById(i);
+const LSK = "jct_picker_key", LSP = "jct_picker_picks";
+let picks = {};
+try{ picks = JSON.parse(localStorage.getItem(LSP) || "{}"); }catch(e){ picks = {}; }
+try{ $("key").value = localStorage.getItem(LSK) || ""; }catch(e){}
+
+function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function svLink(v){
+  const p = new URLSearchParams({api:1,map_action:"pano",viewpoint:v.lat+","+v.lng,heading:v.heading??0,pitch:v.pitch??0,fov:75});
+  return "https://www.google.com/maps/@?"+p;
+}
+function imgUrl(v,key){
+  const p = new URLSearchParams({size:"400x300",location:v.lat+","+v.lng,heading:v.heading??0,
+                                pitch:v.pitch??0,fov:75,source:"outdoor",key:key});
+  return "https://maps.googleapis.com/maps/api/streetview?"+p;
+}
+
+function render(){
+  const i = +$("jct").value, r = DATA[i];
+  if(!r){ $("grid").innerHTML = ""; return; }
+  let key = ""; try{ key = localStorage.getItem(LSK) || ""; }catch(e){}
+  const chosen = picks[r.id];
+  $("grid").innerHTML = r.candidates.map(c => {
+    const sel = chosen === c.distance_m ? " sel" : "";
+    const body = key
+      ? `<img loading="lazy" src="${esc(imgUrl(c,key))}" alt="手前${c.distance_m}m">`
+      : `<div class="ph">APIキーを入れると<br>ここに画像が出ます</div>`;
+    const far = c.distance_m === 0 ? "分岐点" : "手前 "+c.distance_m+"m";
+    return `<div class="cell${sel}" data-d="${c.distance_m}">${body}
+      <div class="cap"><b>${far}</b><a href="${esc(svLink(c))}" target="_blank" rel="noopener"
+         onclick="event.stopPropagation()">実際に見る</a></div></div>`;
+  }).join("");
+  [...$("grid").children].forEach(el => el.onclick = () => {
+    picks[r.id] = +el.dataset.d;
+    try{ localStorage.setItem(LSP, JSON.stringify(picks)); }catch(e){}
+    render();
+  });
+  showResult(r);
+}
+
+function showResult(r){
+  const d = picks[r.id];
+  if(d === undefined){ $("result").innerHTML = ""; return; }
+  const c = r.candidates.find(x => x.distance_m === d);
+  const p = c && c.pick;
+  if(!p){ $("result").innerHTML = `<div class="res">手前${d}mを選びましたが、そこから__BACK__m下がる地点が本線上にありません。もう少し手前を選んでください。</div>`; return; }
+  $("result").innerHTML = `<div class="res">
+    <b>${esc(r.junction||"名称なし")}</b> — 看板は <b>手前${d}m</b>、撮影ポイントは <b>手前${p.distance_m}m</b><br>
+    <a href="${esc(svLink(p))}" target="_blank" rel="noopener">確定した撮影ポイントを開く</a><br>
+    <code>${p.lat}, ${p.lng} / 方位${p.heading}度</code></div>`;
+}
+
+$("jct").innerHTML = DATA.map((r,i) =>
+  `<option value="${i}">${esc(r.junction||"名称なし")}（${esc(r.mainline)}）</option>`).join("");
+$("jct").onchange = render;
+$("save").onclick = () => {
+  try{ localStorage.setItem(LSK, $("key").value.trim()); }catch(e){}
+  render();
+};
+$("exp").onclick = () => {
+  const out = DATA.filter(r => picks[r.id] !== undefined).map(r => {
+    const c = r.candidates.find(x => x.distance_m === picks[r.id]);
+    return {id:r.id, junction:r.junction, mainline:r.mainline,
+            sign_distance_m:picks[r.id], view:(c&&c.pick)||null};
+  });
+  const b = new Blob([JSON.stringify(out,null,1)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(b); a.download = "picks.json"; a.click();
+};
+render();
+</script></body></html>
+"""
+
+
+def write_picker(results, path):
+    """看板の位置を目で確かめて選ぶためのページを書き出す"""
+    data = [{"id": r["diverge_node"], "junction": r["junction"], "mainline": r["mainline"],
+             "candidates": r["candidates"]} for r in results if r.get("candidates")]
+    html = (PICKER_TMPL
+            .replace("__DATA__", json.dumps(data, ensure_ascii=False))
+            .replace("__SPAN__", str(PICK_SPAN)).replace("__STEP__", str(PICK_STEP))
+            .replace("__BACK__", str(PICK_BACK)))
+    open(path, "w", encoding="utf-8").write(html)
+
+
 def write_html(results, path):
     rows = []
     for r in results:
@@ -315,6 +484,7 @@ if __name__ == "__main__":
     ap.add_argument("--test", action="store_true")
     ap.add_argument("--from-file", help="Overpassの代わりに保存済みJSONを読む(テスト用)")
     ap.add_argument("--diagnose", action="store_true", help="分岐が検出されない原因を調べる")
+    ap.add_argument("--picker", action="store_true", help="看板の位置を選ぶ確認用ページも出力する")
     ap.add_argument("--keyword", default="", help="--diagnose で注目する分岐名")
     a = ap.parse_args()
     if a.test or not (a.bbox or a.from_file):
@@ -326,7 +496,7 @@ if __name__ == "__main__":
     if a.diagnose:
         diagnose(osm, a.keyword)
         sys.exit()
-    res = find_diverges(osm)
+    res = find_diverges(osm, with_candidates=a.picker)
     if a.key:
         for r in res:
             for v in r["views"]:
@@ -341,5 +511,9 @@ if __name__ == "__main__":
     json.dump(res, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     html = os.path.join(a.outdir, a.region + ".html")
     write_html(res, html)
+    if a.picker:
+        pick = os.path.join(a.outdir, a.region + "_picker.html")
+        write_picker(res, pick)
+        print(f"看板さがしのページ: {pick}")
     update_index(a.outdir)
     print(f"{len(res)} 件の分岐を出力しました: {out} / {html}")
